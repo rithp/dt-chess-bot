@@ -9,17 +9,19 @@ Step 1 — Parse PGN data (if not already done):
         --max_games 50000 \\
         --min_year 2018
 
-Step 2 — Train:
+Step 2 — Train (fresh):
     python train_chess.py \\
         --data_path data/chess_trajectories.pkl \\
-        --K 20 \\
-        --embed_dim 128 \\
-        --n_layer 3 \\
-        --n_head 4 \\
-        --batch_size 64 \\
-        --max_iters 10 \\
-        --num_steps_per_iter 5000 \\
-        --device cuda
+        --K 20 --embed_dim 128 --n_layer 3 --n_head 4 \\
+        --batch_size 64 --max_iters 10 --num_steps_per_iter 5000 \\
+        --device mps
+
+Step 3 — Resume from where you left off:
+    python train_chess.py \\
+        --data_path data/chess_trajectories.pkl \\
+        --K 20 --embed_dim 128 --n_layer 3 --n_head 4 \\
+        --batch_size 64 --max_iters 20 --num_steps_per_iter 5000 \\
+        --device mps --resume
 """
 
 import argparse
@@ -214,8 +216,13 @@ def main():
                         help="RTG to condition on during evaluation (1.0 = aim to win)")
 
     # Misc
-    parser.add_argument("--device",     type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--save_path",  type=str, default="checkpoints/chess_dt.pt")
+    parser.add_argument("--device",       type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--save_path",    type=str, default="checkpoints/chess_dt_best.pt",
+                        help="Path for the best-win-rate checkpoint")
+    parser.add_argument("--latest_path",  type=str, default="checkpoints/chess_dt_latest.pt",
+                        help="Path for the latest checkpoint (saved every iteration)")
+    parser.add_argument("--resume",       action="store_true",
+                        help="Resume training from --latest_path checkpoint")
     parser.add_argument("--log_to_wandb", action="store_true")
 
     args = parser.parse_args()
@@ -293,13 +300,32 @@ def main():
         )
 
     # ── Training loop ────────────────────────────────────────────────────────
-    os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(args.save_path)   or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(args.latest_path) or ".", exist_ok=True)
 
+    start_iter    = 0
     best_win_rate = -1.0
-    for iteration in range(args.max_iters):
+
+    # ── Resume from latest checkpoint (if requested) ─────────────────────────
+    if args.resume:
+        resume_path = args.latest_path
+        if not os.path.exists(resume_path):
+            print(f"[resume] No checkpoint found at {resume_path}, starting fresh.")
+        else:
+            print(f"[resume] Loading checkpoint from {resume_path} ...")
+            ckpt = torch.load(resume_path, map_location=args.device)
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if "scheduler_state_dict" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            start_iter    = ckpt.get("iteration", 0) + 1
+            best_win_rate = ckpt.get("best_win_rate", -1.0)
+            print(f"[resume] Resuming from iteration {start_iter + 1}  "
+                  f"(best win rate so far: {best_win_rate:.3f})")
+    for iteration in range(start_iter, args.max_iters):
         outputs = trainer.train_iteration(
-            num_steps = args.num_steps_per_iter,
-            iter_num  = iteration + 1,
+            num_steps  = args.num_steps_per_iter,
+            iter_num   = iteration + 1,
             print_logs = True,
         )
 
@@ -307,22 +333,32 @@ def main():
             import wandb
             wandb.log(outputs)
 
-        # Save checkpoint on best win rate
-        win_key = f"eval/win_rate_rtg{args.target_rtg:.1f}"
-        if win_key in outputs and outputs[win_key] > best_win_rate:
-            best_win_rate = outputs[win_key]
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "iteration": iteration,
-                "args": vars(args),
-                "state_mean": state_mean,
-                "state_std":  state_std,
-            }, args.save_path)
-            print(f"  ✓ Checkpoint saved (win rate {best_win_rate:.3f})")
+        win_key  = f"eval/win_rate_rtg{args.target_rtg:.1f}"
+        win_rate = outputs.get(win_key, 0.0)
+
+        # ── Always save the latest checkpoint ────────────────────────────────
+        latest_payload = {
+            "model_state_dict":     model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "iteration":            iteration,
+            "best_win_rate":        best_win_rate,
+            "args":                 vars(args),
+            "state_mean":           state_mean,
+            "state_std":            state_std,
+        }
+        torch.save(latest_payload, args.latest_path)
+        print(f"  → Latest checkpoint saved (iter {iteration + 1})")
+
+        # ── Save best checkpoint only on improvement ──────────────────────────
+        if win_rate > best_win_rate:
+            best_win_rate = win_rate
+            torch.save(latest_payload | {"best_win_rate": best_win_rate}, args.save_path)
+            print(f"  ✓ Best checkpoint saved (win rate {best_win_rate:.3f})")
 
     print("\nTraining complete.")
     print(f"Best win rate vs random: {best_win_rate:.3f}")
+
 
 
 if __name__ == "__main__":
