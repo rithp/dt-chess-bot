@@ -78,7 +78,28 @@ Key flags:
 | `--num_eval_games` | 20 | Games vs random mover per eval |
 | `--log_to_wandb` | False | Enable W&B logging |
 
-Checkpoints are saved to `checkpoints/chess_dt.pt` whenever the win rate improves.
+Two checkpoints are saved automatically:
+
+| File | When saved |
+|---|---|
+| `checkpoints/chess_dt_latest.pt` | Every iteration — use this to resume |
+| `checkpoints/chess_dt_best.pt` | Only when win rate improves |
+
+---
+
+## Step 3 — Resume Training
+
+If you pause or cancel training, resume from exactly where you left off:
+
+```bash
+python3 train_chess.py \
+    --data_path data/chess_trajectories.pkl \
+    --K 20 --embed_dim 128 --n_layer 3 --n_head 4 \
+    --batch_size 64 --max_iters 20 --num_steps_per_iter 5000 \
+    --device mps --resume
+```
+
+> **Note:** Set `--max_iters` to a value higher than where you stopped. For example, if your previous run did 10 iterations, set `--max_iters 20` to run 10 more. The `--resume` flag loads `chess_dt_latest.pt` and restores the model, optimizer, scheduler, and iteration counter automatically.
 
 ---
 
